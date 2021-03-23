@@ -9,6 +9,8 @@ from sklearn.tree import plot_tree
 from sklearn.preprocessing import LabelBinarizer
 import matplotlib.pyplot as plt
 
+DEBUG = False
+
 def int_info(a: np.ndarray):
     return np.sum(-np.log2(a/a.size)*a/a.size)
 
@@ -32,12 +34,14 @@ class Node:
     def __str__(self) -> str:
         return str(self.__dict__)
 
-    def _train(self, X, y: np.ndarray, properties, prop_idx, method='entropy'):
+    def _train(self, X, y: np.ndarray, properties, prop_idx, method='entropy', algo='ID3'):
         """
         X: attrs
         y: classes
         properties: list of propaerties of each attr
             ['cat', 'cont', 'cat', 'cont']
+        method: {'entropy', 'gini', 'gain_ratio'}
+        algo: {'ID3', 'CART'}
         """
         gain_func = self._gain_func(method)
         #print(properties)
@@ -45,15 +49,41 @@ class Node:
         classes, counts = np.unique(y, return_counts=True)
         # Apply root to be labelled as the most popular class
         most_pop = mode(y)[0][0]
-        if len(y) <= self.min_sample_leaf or classes.size == 1 or len(properties) <= 0: return Node(most_pop, is_leaf=True)
+        if len(y) <= self.min_sample_leaf or classes.size == 1 or len(properties) <= 0: 
+            if DEBUG:
+                print(f"Hit leaf node on single sample: {len(y) <= self.min_sample_leaf},\
+                same class: {classes.size == 1} with class {classes[0]}, no more attr: {len(properties) <= 0}")
+            return Node(most_pop, is_leaf=True)
         I = gain_func(counts/y.size)
         self.info = I
+
+        if DEBUG: print("Current Node info: ", I)
         """
         For each column, calculate the entropy of the column of data
         """
-        gain = 0
         best_attr = None
         known_vals = None
+        best_attr, known_vals = self._best_attr(X, y, I, prop_idx, properties, method)
+        self.type = properties[best_attr]
+        self.attr_idx = prop_idx[best_attr]
+        if self.type == 'cat':
+            root_val = []
+            for val in known_vals:
+                root_val.append(val)
+                x_sub, y_sub = X[X[:, best_attr] == val], y[X[:, best_attr] == val]
+                self._add_branch(x_sub, y_sub, best_attr, properties, prop_idx, method, algo)
+            self.val = root_val
+        elif self.type == 'cont':
+            val = known_vals[0] # single Y/N split
+            self.val = val
+            x_val_hi, y_val_hi = X[X[:, best_attr] > val], y[X[:, best_attr] > val]
+            x_val_lo, y_val_lo = X[X[:, best_attr] <= val], y[X[:, best_attr] <= val]
+            self._add_branch(x_val_lo, y_val_lo, best_attr, properties, prop_idx, method, algo)
+            self._add_branch(x_val_hi, y_val_hi, best_attr, properties, prop_idx, method, algo)
+        return self
+
+    def _best_attr(self, X, y, I, prop_idx, properties, method):
+        gain = 0
         for i in range(X.shape[1]):
             # calculate gain
             col = X[:, i]
@@ -66,51 +96,36 @@ class Node:
                 if col_sort.size <= 1:
                     continue
                 new_gain, possible_known_vals = self._information_cont(col, y, I, method)
+            if DEBUG: 
+                    print(
+                        f"New gain found with gain: {new_gain} I_res: {I - new_gain} for idx: {prop_idx[i]} with known_vals: {possible_known_vals}"
+                        )
             if new_gain >= gain:
                 best_attr = i
                 known_vals = possible_known_vals
                 gain = new_gain
-        self.type = properties[best_attr]
-        self.attr_idx = prop_idx[best_attr]
-        if self.type == 'cat':
-            root_val = []
-            for val in known_vals:
-                root_val.append(val)
-                x_sub, y_sub = X[X[:, best_attr] == val], y[X[:, best_attr] == val]
-                if y_sub.size <= 0:
-                    self.children.append(Node(most_pop, is_leaf=True))
-                else:
-                    self.children.append(Node(None)._train(
-                                        np.delete(x_sub, best_attr, axis=1),
-                                        y_sub,
-                                        properties=properties[:best_attr] + properties[best_attr+1:],
-                                        prop_idx=prop_idx[:best_attr] + prop_idx[best_attr+1:],
-                                        method=method))
-            self.val = root_val
-        elif self.type == 'cont':
-            val = known_vals[0] # single Y/N split
-            self.val = val
-            x_val_hi, y_val_hi = X[X[:, best_attr] > val], y[X[:, best_attr] > val]
-            x_val_lo, y_val_lo = X[X[:, best_attr] <= val], y[X[:, best_attr] <= val]
-            if y_val_lo.size <= 0:
-                self.children.append(Node(most_pop, is_leaf=True))
-            else:
-                self.children.append(Node(None)._train(
-                                        np.delete(x_val_lo, best_attr, axis=1),
-                                        y_val_lo,
-                                        properties=properties[:best_attr] + properties[best_attr+1:],
-                                        prop_idx=prop_idx[:best_attr] + prop_idx[best_attr+1:],
-                                        method=method))
-            if y_val_hi.size <= 0:
-                self.children.append(Node(most_pop, is_leaf=True))
-            else:
-                self.children.append(Node(None)._train(
-                                        np.delete(x_val_hi, best_attr, axis=1),
-                                        y_val_hi,
-                                        properties=properties[:best_attr] + properties[best_attr+1:],
-                                        prop_idx=prop_idx[:best_attr] + prop_idx[best_attr+1:],
-                                        method=method))
-        return self
+        return best_attr, known_vals
+
+    def _add_branch(self, x, y, best_attr, properties, prop_idx, method, algo):
+        most_pop = mode(y)[0][0]
+        if algo == 'ID3':
+            new_prop = properties[:best_attr] + properties[best_attr+1:]
+            new_prop_idx = prop_idx[:best_attr] + prop_idx[best_attr+1:]
+            new_x = np.delete(x, best_attr, axis=1)
+        else:
+            new_prop = properties
+            new_prop_idx = prop_idx
+            new_x = x
+        if y.size <= 0:
+            self.children.append(Node(most_pop, is_leaf=True))
+        else:
+            self.children.append(Node(None)._train(
+                                    new_x,
+                                    y,
+                                    properties=new_prop,
+                                    prop_idx=new_prop_idx,
+                                    method=method,
+                                    algo=algo))
 
     def _information_cont(self, col, y, info, method='entropy'):
         gain_func = self._gain_func(method)
@@ -156,13 +171,17 @@ class Node:
             gain_func = lambda p: entropy(p, base=2)
         return gain_func
 
+    def format_tree(self, s, labels):
+        if not self.is_leaf:
+            print("----"*s+ "attr: {}, vals: {}, info: {}".format(labels[self.attr_idx], self.val, self.info))
+        else:
+            print("----"*s + "Leaf label: {}".format(self.label))
+        for child in self.children:
+            child.format_tree(s+1,labels)
+
     @classmethod
-    def train(cls, X, y, properties, method='entropy'):
-        return Node(None)._train(X, y, properties, list(range(len(properties))), method=method)
-
-
-
-
+    def train(cls, X, y, properties, method='entropy', algo="ID3"):
+        return Node(None)._train(X, y, properties, list(range(len(properties))), method=method, algo=algo)
 
 class DecisionTreeClassifier:
 
@@ -171,9 +190,9 @@ class DecisionTreeClassifier:
         self.root = Node(None)
 
 
-    def train(self, X, y, properties=[], method='entropy'):
+    def train(self, X, y, properties=[], method='entropy', algo='ID3'):
         if not properties: properties = self._attr_types(X)
-        self.root = Node.train(X, y, properties, method=method)
+        self.root = Node.train(X, y, properties, method=method, algo=algo)
 
     def _attr_types(self, X, cat_thresh=3):
         properties = []
@@ -183,8 +202,10 @@ class DecisionTreeClassifier:
             else: properties.append('cat')
         return properties
 
-    def predict(self, X):
+    def format_tree(self, labels):
+        self.root.format_tree(0, labels)
 
+    def predict(self, X):
         if X.ndim < 2:
             X_mat = np.array([X])
         else: X_mat = np.array(X)
@@ -194,33 +215,24 @@ class DecisionTreeClassifier:
         for i in range(X_mat.shape[0]):
             vec = X_mat[i]
             # print(vec)
-            label = DecisionTreeClassifier._traverse(vec, self.root)
+            label = self._traverse(vec)
             pred = np.append(pred, label)
         return pred
 
-    @classmethod
-    def _traverse(cls, vec, r: Node):
-        if r.is_leaf:
-            return r.label
-        else:
-            best_val = vec[r.attr_idx]
-            if r.type == 'cont':
-                if best_val <= r.val:
-                    return DecisionTreeClassifier._traverse(vec, r.children[0])
+    def _traverse(self, vec):
+        curr = self.root
+        while not curr.is_leaf:
+            best_val = vec[curr.attr_idx]
+            if curr.type == 'cont':
+                if best_val <= curr.val:
+                    curr = curr.children[0]
                 else:
-                    return DecisionTreeClassifier._traverse(vec, r.children[1])
+                    curr = curr.children[1]
             else:
                 #print(r.val)
-                idx = r.val.index(best_val)
-                return DecisionTreeClassifier._traverse(vec, r=r.children[idx])
-
-def formatTree(t,s,labels=["outlook", "temp", "humidity", "windy"]):
-    if not t.is_leaf:
-        print("----"*s+ "attr: {}, vals: {}, info: {}".format(labels[t.attr_idx], t.val, t.info))
-    else:
-        print("----"*s + "label: {}, vals: {}, idx: {}".format(t.label, t.val, t.attr_idx))
-    for child in t.children:
-        formatTree(child,s+1,labels=labels)
+                idx = curr.val.index(best_val)
+                curr = curr.children[idx]
+        return curr.label
 
 if __name__ == "__main__":
     df = pd.read_csv("data.csv")
@@ -235,17 +247,16 @@ if __name__ == "__main__":
         }
     )
     df = df.append(test_val, ignore_index=True)
-    node = Node.train(X, Y, ["cat", "cont", 'cont', 'cat'])
+    # node = Node.train(X, Y, ["cat", "cont", 'cont', 'cat'])
     #print(node.children[0])
-    #formatTree(node, 0)
-    
+    # format_tree(node, 0, ["outlook", "temp", "humidity", "windy"])
     trans_data = pd.get_dummies(df[['outlook', 'temp', 'humidity', 'windy']], drop_first=True)
-    baseline = DTC(criterion="gini")
+    baseline = DTC(criterion="entropy")
     baseline.fit(trans_data.iloc[:-1], Y)
     print("Baseline prediction: ", baseline.predict(trans_data.iloc[-1].to_numpy().reshape(1, -1)))
     model = DecisionTreeClassifier()
-    model.train(trans_data.iloc[:-1].to_numpy(), Y, properties=["cont", "cont", 'cont', 'cont', 'cont'], method='gini')
-    formatTree(model.root, 0, labels=trans_data.columns.tolist())
+    model.train(trans_data.iloc[:-1].to_numpy(), Y, properties=["cont", "cont", 'cont', 'cont', 'cont'], method='entropy', algo='CART')
+    model.format_tree(trans_data.columns.tolist())
     print("Impl predict: ", model.predict(trans_data.iloc[-1]))
     plot_tree(baseline, feature_names=trans_data.columns)
     plt.show()
