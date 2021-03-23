@@ -39,10 +39,7 @@ class Node:
         properties: list of propaerties of each attr
             ['cat', 'cont', 'cat', 'cont']
         """
-        if method == 'gini':
-            gain_func = lambda p: gini_index(p)
-        else:
-            gain_func = lambda p: entropy(p, base=2)
+        gain_func = self._gain_func(method)
         #print(properties)
         assert X.shape[0] == y.size
         classes, counts = np.unique(y, return_counts=True)
@@ -116,10 +113,7 @@ class Node:
         return self
 
     def _information_cont(self, col, y, info, method='entropy'):
-        if method == 'gini':
-            gain_func = lambda p: gini_index(p)
-        else:
-            gain_func = lambda p: entropy(p, base=2)
+        gain_func = self._gain_func(method)
         col_sort = np.sort(np.unique(col))
         split_points = (col_sort[1::] + col_sort[0:-1]) * 0.5
         possible_i_res = np.zeros_like(split_points)
@@ -142,10 +136,7 @@ class Node:
         return gain, possible_known_vals
 
     def _information_cat(self, col, y, info, method='entropy'):
-        if method == 'gini':
-            gain_func = lambda p: gini_index(p)
-        else:
-            gain_func = lambda p: entropy(p, base=2)
+        gain_func = self._gain_func(method)
         I_res = 0
         possible_known_vals, val_counts = np.unique(col, return_counts=True)
         for val, val_count in zip(possible_known_vals, val_counts):
@@ -157,6 +148,13 @@ class Node:
             gain = (info - I_res) / int_info(val_counts/y.size)
         else: gain = info - I_res
         return gain, possible_known_vals
+
+    def _gain_func(self, method):
+        if method == 'gini':
+            gain_func = lambda p: gini_index(p)
+        else:
+            gain_func = lambda p: entropy(p, base=2)
+        return gain_func
 
     @classmethod
     def train(cls, X, y, properties, method='entropy'):
