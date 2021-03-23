@@ -9,6 +9,12 @@ from sklearn.tree import plot_tree
 from sklearn.preprocessing import LabelBinarizer
 import matplotlib.pyplot as plt
 
+def int_info(a: np.ndarray):
+    return np.sum(-np.log2(a/a.size)*a/a.size)
+
+def gini_index(a: np.ndarray):
+    return 1 - np.sum(a**2)
+
 class Node:
     def __init__(self, label, is_leaf=False, min_sample_leaf=1):
         self.label = label
@@ -17,8 +23,8 @@ class Node:
         self.min_sample_leaf = min_sample_leaf
         self.attr_idx = None
         self.val = None
-        self.eval_func = None
         self.type = None # 'cont' or 'cat'
+        self.info = None
 
     def __repr__(self) -> str:
         return str(self.__dict__)
@@ -26,66 +32,47 @@ class Node:
     def __str__(self) -> str:
         return str(self.__dict__)
 
-    def _train(self, X, y: np.ndarray, properties, prop_idx):
+    def _train(self, X, y: np.ndarray, properties, prop_idx, method='entropy'):
         """
         X: attrs
         y: classes
         properties: list of propaerties of each attr
             ['cat', 'cont', 'cat', 'cont']
         """
+        if method == 'gini':
+            gain_func = lambda p: gini_index(p)
+        else:
+            gain_func = lambda p: entropy(p, base=2)
         #print(properties)
         assert X.shape[0] == y.size
         classes, counts = np.unique(y, return_counts=True)
         # Apply root to be labelled as the most popular class
         most_pop = mode(y)[0][0]
         if len(y) <= self.min_sample_leaf or classes.size == 1 or len(properties) <= 0: return Node(most_pop, is_leaf=True)
-        I = entropy(counts/y.size, base=2)
+        I = gain_func(counts/y.size)
+        self.info = I
         """
         For each column, calculate the entropy of the column of data
         """
-        IG = 0
+        gain = 0
         best_attr = None
         known_vals = None
         for i in range(X.shape[1]):
-            # calculate IG
+            # calculate gain
             col = X[:, i]
-            I_res = 0
             possible_known_vals = None
             if properties[i] == 'cat':
-                possible_known_vals, val_counts = np.unique(col, return_counts=True)
-                for val, val_count in zip(possible_known_vals, val_counts):
-                    y_val = y[col == val]
-                    __, cond_counts = np.unique(y_val, return_counts=True)
-                    cond_class_entropy = entropy(cond_counts/y_val.size, base=2)
-                    I_res += val_count/ y.size * cond_class_entropy
+                new_gain, possible_known_vals = self._information_cat(col, y, I, method)
             elif properties[i] == 'cont':
                 col_sort = np.sort(np.unique(col))
                 # One single unique value, cannot split
                 if col_sort.size <= 1:
                     continue
-                split_points = (col_sort[1::] + col_sort[0:-1]) * 0.5
-                possible_i_res = np.zeros_like(split_points)
-                index = 0
-                for sp in split_points:
-                    y_hi, y_lo = y[col > sp], y[col <= sp]
-                    for D in [y_hi, y_lo]:
-                        __, cond_counts = np.unique(D, return_counts=True)
-                        cond_class_entropy = entropy(cond_counts/D.size, base=2)
-                        possible_i_res[index] += D.size/ y.size * cond_class_entropy
-                    index += 1
-                try:
-                    I_res_idx= np.argmin(possible_i_res)
-                except ValueError:
-                    print(y)
-                    print(col_sort)
-                    print(possible_i_res)
-                    raise Exception
-                I_res = possible_i_res[I_res_idx]
-                possible_known_vals = np.array([split_points[I_res_idx]])
-            if I - I_res >= IG:
+                new_gain, possible_known_vals = self._information_cont(col, y, I, method)
+            if new_gain >= gain:
                 best_attr = i
                 known_vals = possible_known_vals
-                IG = I - I_res
+                gain = new_gain
         self.type = properties[best_attr]
         self.attr_idx = prop_idx[best_attr]
         if self.type == 'cat':
@@ -100,7 +87,8 @@ class Node:
                                         np.delete(x_sub, best_attr, axis=1),
                                         y_sub,
                                         properties=properties[:best_attr] + properties[best_attr+1:],
-                                        prop_idx=prop_idx[:best_attr] + prop_idx[best_attr+1:]))
+                                        prop_idx=prop_idx[:best_attr] + prop_idx[best_attr+1:],
+                                        method=method))
             self.val = root_val
         elif self.type == 'cont':
             val = known_vals[0] # single Y/N split
@@ -111,10 +99,11 @@ class Node:
                 self.children.append(Node(most_pop, is_leaf=True))
             else:
                 self.children.append(Node(None)._train(
-                                        np.delete(x_val_lo, 1, axis=1),
+                                        np.delete(x_val_lo, best_attr, axis=1),
                                         y_val_lo,
                                         properties=properties[:best_attr] + properties[best_attr+1:],
-                                        prop_idx=prop_idx[:best_attr] + prop_idx[best_attr+1:]))
+                                        prop_idx=prop_idx[:best_attr] + prop_idx[best_attr+1:],
+                                        method=method))
             if y_val_hi.size <= 0:
                 self.children.append(Node(most_pop, is_leaf=True))
             else:
@@ -122,12 +111,56 @@ class Node:
                                         np.delete(x_val_hi, best_attr, axis=1),
                                         y_val_hi,
                                         properties=properties[:best_attr] + properties[best_attr+1:],
-                                        prop_idx=prop_idx[:best_attr] + prop_idx[best_attr+1:]))
+                                        prop_idx=prop_idx[:best_attr] + prop_idx[best_attr+1:],
+                                        method=method))
         return self
 
+    def _information_cont(self, col, y, info, method='entropy'):
+        if method == 'gini':
+            gain_func = lambda p: gini_index(p)
+        else:
+            gain_func = lambda p: entropy(p, base=2)
+        col_sort = np.sort(np.unique(col))
+        split_points = (col_sort[1::] + col_sort[0:-1]) * 0.5
+        possible_i_res = np.zeros_like(split_points)
+        index = 0
+        for sp in split_points:
+            y_hi, y_lo = y[col > sp], y[col <= sp]
+            for D in [y_hi, y_lo]:
+                __, cond_counts = np.unique(D, return_counts=True)
+                cond_class_entropy = gain_func(cond_counts/D.size)
+                possible_i_res[index] += D.size/ y.size * cond_class_entropy
+            index += 1
+        i_res_idx= np.argmin(possible_i_res)
+        I_res = possible_i_res[i_res_idx]
+        best_split = split_points[i_res_idx]
+        possible_known_vals = np.array([best_split])
+        val_counts = np.array([np.sum(col > best_split), np.sum(col <= best_split)])
+        if method == "gain_ratio":
+            gain = (info - I_res) / int_info(val_counts/y.size)
+        else: gain = info - I_res
+        return gain, possible_known_vals
+
+    def _information_cat(self, col, y, info, method='entropy'):
+        if method == 'gini':
+            gain_func = lambda p: gini_index(p)
+        else:
+            gain_func = lambda p: entropy(p, base=2)
+        I_res = 0
+        possible_known_vals, val_counts = np.unique(col, return_counts=True)
+        for val, val_count in zip(possible_known_vals, val_counts):
+            y_val = y[col == val]
+            __, cond_counts = np.unique(y_val, return_counts=True)
+            cond_class_entropy = gain_func(cond_counts/y_val.size)
+            I_res += val_count/ y.size * cond_class_entropy
+        if method == "gain_ratio":
+            gain = (info - I_res) / int_info(val_counts/y.size)
+        else: gain = info - I_res
+        return gain, possible_known_vals
+
     @classmethod
-    def train(cls, X, y, properties):
-        return Node(None)._train(X, y, properties, list(range(len(properties))))
+    def train(cls, X, y, properties, method='entropy'):
+        return Node(None)._train(X, y, properties, list(range(len(properties))), method=method)
 
 
 
@@ -140,9 +173,9 @@ class DecisionTreeClassifier:
         self.root = Node(None)
 
 
-    def train(self, X, y, properties=[]):
+    def train(self, X, y, properties=[], method='entropy'):
         if not properties: properties = self._attr_types(X)
-        self.root = Node.train(X, y, properties)
+        self.root = Node.train(X, y, properties, method=method)
 
     def _attr_types(self, X, cat_thresh=3):
         properties = []
@@ -185,7 +218,7 @@ class DecisionTreeClassifier:
 
 def formatTree(t,s,labels=["outlook", "temp", "humidity", "windy"]):
     if not t.is_leaf:
-        print("----"*s+ "attr: {}, vals: {}, idx: {}".format(labels[t.attr_idx], t.val, t.attr_idx))
+        print("----"*s+ "attr: {}, vals: {}, info: {}".format(labels[t.attr_idx], t.val, t.info))
     else:
         print("----"*s + "label: {}, vals: {}, idx: {}".format(t.label, t.val, t.attr_idx))
     for child in t.children:
@@ -209,11 +242,11 @@ if __name__ == "__main__":
     #formatTree(node, 0)
     
     trans_data = pd.get_dummies(df[['outlook', 'temp', 'humidity', 'windy']], drop_first=True)
-    baseline = DTC(criterion="entropy")
+    baseline = DTC(criterion="gini")
     baseline.fit(trans_data.iloc[:-1], Y)
     print("Baseline prediction: ", baseline.predict(trans_data.iloc[-1].to_numpy().reshape(1, -1)))
     model = DecisionTreeClassifier()
-    model.train(trans_data.iloc[:-1].to_numpy(), Y, properties=["cont", "cont", 'cont', 'cont', 'cont'])
+    model.train(trans_data.iloc[:-1].to_numpy(), Y, properties=["cont", "cont", 'cont', 'cont', 'cont'], method='gini')
     formatTree(model.root, 0, labels=trans_data.columns.tolist())
     print("Impl predict: ", model.predict(trans_data.iloc[-1]))
     plot_tree(baseline, feature_names=trans_data.columns)
